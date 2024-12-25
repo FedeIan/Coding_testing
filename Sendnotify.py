@@ -11,6 +11,7 @@ def send_email(subject, body):
     sender_password = "zmcy kyqg jeme hfyi"  # Sostituisci con la password per app generata
     recipient_email = "luifederico84@gmail.com"  # Email destinatario
 
+
     # Creazione del messaggio
     msg = MIMEMultipart()
     msg['From'] = sender_email
