@@ -89,6 +89,7 @@ class StockPricePredictorWithFeatures:
         print("Modello addestrato.")
 
     def evaluate_model(self):
+        # Previsione dei prezzi
         predictions = self.model.predict(self.X_test)
         predictions = self.scaler.inverse_transform(
             np.hstack([predictions, np.zeros((len(predictions), self.X_test.shape[2] - 1))])
@@ -97,15 +98,23 @@ class StockPricePredictorWithFeatures:
             np.hstack([self.y_test.reshape(-1, 1), np.zeros((len(self.y_test), self.X_test.shape[2] - 1))])
         )[:, 0]
         test_dates = self.data.index[self.lookback + len(self.X_train):]
+
+        # Ultimo prezzo di chiusura
+        last_close_price = float(self.data['Adj Close'].iloc[-1])
+
+        # Creazione del grafico
         plt.figure(figsize=(12, 6))
         plt.plot(test_dates, true_prices, color='blue', label='True Prices')
         plt.plot(test_dates, predictions, color='red', label='Predicted Prices')
+        plt.axhline(last_close_price, color='green', linestyle='--', label=f'Last Close: {last_close_price:.2f}')
+        plt.text(test_dates[-1], last_close_price, f'{last_close_price:.2f}', color='green', fontsize=10, va='center')
+
+        # Titoli e legende
         plt.title(f'True vs Predicted Prices for {self.ticker}')
         plt.xlabel('Date')
         plt.ylabel('Price')
         plt.legend()
         plt.show()
-
 
 if __name__ == "__main__":
     ticker = input("Inserisci il ticker dell'azione (es. TSLA, NVDA): ").strip().upper()
