@@ -1,124 +1,130 @@
 import yfinance as yf
-import numpy as np
 import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, LSTM, Bidirectional, Input
-from datetime import datetime
-import matplotlib.pyplot as plt
+from tensorflow.keras.layers import Dense, Dropout, Input
+from tensorflow.keras.optimizers import Adam
 
 
-class StockPricePredictorWithFeatures:
-    def __init__(self, ticker, start_date, end_date=None, lookback=60):
-        self.ticker = ticker
-        self.start_date = start_date
-        self.end_date = end_date if end_date else datetime.today().strftime('%Y-%m-%d')
-        self.lookback = lookback
-        self.data = None
-        self.scaler = None
-        self.model = None
+# === FUNZIONI PER INDICATORI ===
 
-    def fetch_data(self):
-        # Scarica i dati da Yahoo Finance
-        data = yf.download(self.ticker, start=self.start_date, end=self.end_date)
+def calculate_rsi(data, window=14):
+    delta = data.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
 
-        # Calcola la media mobile semplice (SMA) e altre feature
-        data['SMA_20'] = data['Adj Close'].rolling(window=20).mean().squeeze()
-        data['EMA_20'] = data['Adj Close'].ewm(span=20, adjust=False).mean().squeeze()
-        data['RSI'] = self.calculate_rsi(data['Adj Close'])
 
-        # Calcolo robusto delle Bande di Bollinger
-        rolling_std = data['Adj Close'].rolling(window=20).std().squeeze()
-        data['Bollinger_Upper'] = data['SMA_20'] + 2 * rolling_std
-        data['Bollinger_Lower'] = data['SMA_20'] - 2 * rolling_std
+def calculate_macd(df):
+    short_ema = df['Close'].ewm(span=12, adjust=False).mean()
+    long_ema = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = short_ema - long_ema
+    df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
 
-        # Altre feature
-        data['Spread'] = data['High'] - data['Low']
-        data['Momentum'] = data['Adj Close'] - data['Adj Close'].shift(10)
-        data['Volatility'] = rolling_std
-        data['OBV'] = self.calculate_obv(data['Adj Close'], data['Volume'])
-        data['Day_of_Week'] = data.index.dayofweek
-        data['Month'] = data.index.month
 
-        # Debug: stampa i risultati intermedi
-        print(f"Calcolo SMA_20:\n{data['SMA_20'].head()}")
-        print(f"Calcolo rolling_std:\n{rolling_std.head()}")
-        print(f"Bollinger Upper:\n{data['Bollinger_Upper'].head()}")
+def calculate_bollinger_bands(df, window=20):
+    rolling_mean = df['Close'].rolling(window=window).mean()
+    rolling_std = df['Close'].rolling(window=window).std()
+    df['Upper_Band'] = rolling_mean + 2 * rolling_std
+    df['Lower_Band'] = rolling_mean - 2 * rolling_std
 
-        # Rimuove eventuali valori NaN
-        self.data = data.dropna()
-        print(f"Dati scaricati e arricchiti:\n{self.data.head()}")
 
-    def calculate_rsi(self, series, period=14):
-        delta = series.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        rs = gain / loss
-        return 100 - (100 / (1 + rs))
+def calculate_stochastic_oscillator(df, window=14):
+    df['%K'] = 100 * ((df['Close'] - df['Low'].rolling(window).min()) /
+                      (df['High'].rolling(window).max() - df['Low'].rolling(window).min()))
+    df['%D'] = df['%K'].rolling(3).mean()
 
-    def calculate_obv(self, close, volume):
-        obv = (np.sign(close.diff()) * volume).fillna(0).cumsum()
-        return obv
 
-    def prepare_data(self):
-        self.scaler = MinMaxScaler(feature_range=(0, 1))
-        scaled_data = self.scaler.fit_transform(self.data)
-        X, y = [], []
-        for i in range(self.lookback, len(scaled_data)):
-            X.append(scaled_data[i - self.lookback:i, :])
-            y.append(scaled_data[i, 0])  # 'Adj Close' come output target
-        X = np.array(X)
-        y = np.array(y)
-        train_size = int(len(X) * 0.8)
-        self.X_train, self.X_test = X[:train_size], X[train_size:]
-        self.y_train, self.y_test = y[:train_size], y[train_size:]
-        print("Dati preparati per il modello.")
+def calculate_atr(df, window=14):
+    high_low = df['High'] - df['Low']
+    high_close = np.abs(df['High'] - df['Close'].shift(1))
+    low_close = np.abs(df['Low'] - df['Close'].shift(1))
+    tr = high_low.combine(high_close, max).combine(low_close, max)
+    df['ATR'] = tr.rolling(window=window).mean()
 
-    def build_model(self):
-        self.model = Sequential()
-        self.model.add(Input(shape=(self.X_train.shape[1], self.X_train.shape[2])))
-        self.model.add(Bidirectional(LSTM(units=50, return_sequences=True)))
-        self.model.add(Bidirectional(LSTM(units=50)))
-        self.model.add(Dense(units=1))
-        self.model.compile(optimizer='adam', loss='mean_squared_error')
-        print("Modello costruito.")
 
-    def train_model(self, epochs=20, batch_size=32):
-        self.model.fit(self.X_train, self.y_train, epochs=epochs, batch_size=batch_size,
-                       validation_data=(self.X_test, self.y_test), verbose=1)
-        print("Modello addestrato.")
+def calculate_moving_averages(df):
+    df['EMA_20'] = df['Close'].ewm(span=20, adjust=False).mean()
+    df['SMA_50'] = df['Close'].rolling(window=50).mean()
 
-    def evaluate_model(self):
-        predictions = self.model.predict(self.X_test)
-        predictions = self.scaler.inverse_transform(
-            np.hstack([predictions, np.zeros((len(predictions), self.X_test.shape[2] - 1))])
-        )[:, 0]
-        true_prices = self.scaler.inverse_transform(
-            np.hstack([self.y_test.reshape(-1, 1), np.zeros((len(self.y_test), self.X_test.shape[2] - 1))])
-        )[:, 0]
-        test_dates = self.data.index[self.lookback + len(self.X_train):]
-        plt.figure(figsize=(12, 6))
-        plt.plot(test_dates, true_prices, color='blue', label='True Prices')
-        plt.plot(test_dates, predictions, color='red', label='Predicted Prices')
-        plt.title(f'True vs Predicted Prices for {self.ticker}')
-        plt.xlabel('Date')
-        plt.ylabel('Price')
-        plt.legend()
-        plt.show()
 
+# === FUNZIONE PRINCIPALE PER PREPARARE I DATI ===
+
+def prepare_data_with_advanced_indicators(ticker, period, interval):
+    df = yf.download(ticker, period=period, interval=interval)
+
+    if df.empty:
+        raise ValueError("Nessun dato disponibile per il ticker richiesto.")
+
+    # Calcolo degli indicatori
+    df['RSI'] = calculate_rsi(df['Close'])
+    calculate_macd(df)
+    calculate_bollinger_bands(df)
+    calculate_stochastic_oscillator(df)
+    calculate_atr(df)
+    calculate_moving_averages(df)
+
+    # Altri indicatori e feature
+    df['Returns'] = np.log(df['Close'] / df['Close'].shift(1))
+    df['Volatility'] = df['Returns'].rolling(window=10).std()
+    df['Momentum'] = df['Close'] / df['Close'].shift(5)
+    df['Distance_to_High'] = (df['High'] - df['Close']) / df['High']
+    df['Distance_to_Low'] = (df['Close'] - df['Low']) / df['Low']
+    df['Target'] = ((df['High'].shift(-10) >= df['High']) |
+                    (df['Low'].shift(-10) <= df['Low'])).astype(int)
+
+    print("Dati prima del dropna:", df.shape)
+    df = df.dropna()  # Rimuove valori NaN
+    if df.empty:
+        raise ValueError("Dopo il preprocessing, il dataset è vuoto. Prova con un altro periodo o intervallo.")
+    print("Dati dopo il dropna:", df.shape)
+
+    features = ['RSI', 'MACD', 'Signal', 'Upper_Band', 'Lower_Band', '%K', '%D', 'ATR', 'EMA_20', 'SMA_50',
+                'Returns', 'Volatility', 'Momentum', 'Distance_to_High', 'Distance_to_Low']
+    X = df[features].values
+    y = df['Target'].values
+
+    return X, y, df
+
+
+# === ESECUZIONE ===
 
 if __name__ == "__main__":
-    ticker = input("Inserisci il ticker dell'azione (es. TSLA, NVDA): ").strip().upper()
-    try:
-        epochs = int(input("Inserisci il numero di epoch per l'addestramento: ").strip())
-    except ValueError:
-        print("Input non valido. Impostazione predefinita: 20 epoch.")
-        epochs = 20
+    ticker = "AAPL"  # Sostituisci con il tuo simbolo
+    period = "1mo"
+    interval = "1h"
 
-    # Inizializza il predittore
-    predictor = StockPricePredictorWithFeatures(ticker=ticker, start_date="2015-01-01")
-    predictor.fetch_data()
-    predictor.prepare_data()
-    predictor.build_model()
-    predictor.train_model(epochs=epochs, batch_size=32)
-    predictor.evaluate_model()
+    # Prepara i dati con gli indicatori avanzati
+    X, y, df = prepare_data_with_advanced_indicators(ticker, period, interval)
+
+    # Normalizza i dati
+    scaler = StandardScaler()
+    X = scaler.fit_transform(X)
+
+    # Split dei dati
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Costruzione del modello
+    model = Sequential([
+        Input(shape=(X_train.shape[1],)),
+        Dense(64, activation='relu'),
+        Dropout(0.3),
+        Dense(32, activation='relu'),
+        Dropout(0.3),
+        Dense(1, activation='sigmoid')
+    ])
+    model.compile(optimizer=Adam(learning_rate=0.001), loss='binary_crossentropy', metrics=['accuracy'])
+
+    print("=== Addestramento del modello ===")
+    model.fit(X_train, y_train, epochs=50, batch_size=32, validation_data=(X_test, y_test), verbose=1)
+
+    print("=== Previsioni ===")
+    last_data = df.iloc[-1][['RSI', 'MACD', 'Signal', 'Upper_Band', 'Lower_Band', '%K', '%D', 'ATR', 'EMA_20',
+                             'SMA_50', 'Returns', 'Volatility', 'Momentum', 'Distance_to_High', 'Distance_to_Low']].values
+    last_data_scaled = scaler.transform([last_data])
+    future_prob = model.predict(last_data_scaled)[0][0]
+
+    print(f"Probabilità di movimento significativo: {future_prob:.2%}")
