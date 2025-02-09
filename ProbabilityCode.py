@@ -15,7 +15,7 @@ from email import encoders
 import smtplib
 import os
 
-# === FUNZIONI ===
+# === FUNZIONI ===ooo
 
 # 1. Prepara i dati
 def prepare_data(ticker, period, interval):
