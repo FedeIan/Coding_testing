@@ -1,158 +1,105 @@
-import pandas as pd
 import yfinance as yf
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split, RandomizedSearchCV
-from sklearn.metrics import accuracy_score
-import sys
+import pandas as pd
 import numpy as np
+from sklearn.model_selection import train_test_split, GridSearchCV
+from xgboost import XGBClassifier
+import talib as ta
+from sklearn.metrics import accuracy_score
+
+# 📌 Richiede input all'utente per Ticker, Periodo e Intervallo
+ticker = input("Inserisci il ticker dell'azione (es. NEE): ").strip().upper()
+period = input("Inserisci il periodo (es. 1y, 2y, 6mo, 5d): ").strip()
+interval = input("Inserisci l'intervallo (es. 1h, 1d, 5m, 15m): ").strip()
+
+# 📌 Scarica dati finanziari
+def get_data(ticker, period, interval):
+    try:
+        data = yf.download(ticker, period=period, interval=interval)
+        if data.empty:
+            raise ValueError(f"Nessun dato disponibile per il ticker {ticker}.")
+        return data
+    except Exception as e:
+        print(f"Errore nel download dei dati: {e}")
+        return None
+
+# 📌 Aggiunta indicatori tecnici
+def add_indicators(data):
+    data = data.dropna()
+
+    # 📌 Assicuriamoci che i dati siano monodimensionali e numerici
+    close_values = data["Close"].dropna().astype(float).values.ravel()
+    high_values = data["High"].dropna().astype(float).values.ravel()
+    low_values = data["Low"].dropna().astype(float).values.ravel()
+
+    # 📌 Calcolo degli indicatori tecnici con input corretti
+    data["RSI"] = ta.RSI(close_values, timeperiod=14)
+
+    data["CCI"] = ta.CCI(high_values, low_values, close_values, timeperiod=14)
+
+    data["VWAP"] = (data["Close"] * data["Volume"]).cumsum() / data["Volume"].cumsum()
+
+    stoch_k, stoch_d = ta.STOCH(high_values, low_values, close_values)
+    data["Stoch_K"], data["Stoch_D"] = stoch_k, stoch_d
+
+    data["Williams_R"] = ta.WILLR(high_values, low_values, close_values, timeperiod=14)
+
+    data["ADX"] = ta.ADX(high_values, low_values, close_values, timeperiod=14)
+
+    data["ROC"] = ta.ROC(close_values, timeperiod=10)
+
+    data["ATR"] = ta.ATR(high_values, low_values, close_values, timeperiod=14)
+
+    macd, macd_signal, _ = ta.MACD(close_values)
+    data["MACD"], data["MACD_signal"] = macd, macd_signal
+
+    # 📌 Aggiunta di nuove feature per trend rialzisti
+    data["SMA_50"] = ta.SMA(close_values, timeperiod=50)
+    data["SMA_200"] = ta.SMA(close_values, timeperiod=200)
+    data["Momentum"] = ta.MOM(close_values, timeperiod=10)
+
+    # 📌 Aggiunta di Supporti e Resistenze
+    data["Support"] = data["Low"].rolling(window=20).min()
+    data["Resistance"] = data["High"].rolling(window=20).max()
+
+    return data.dropna()
 
 
-def wait_for_keypress():
-    print("Premi un tasto per chiudere il programma...")
-    sys.stdin.read(1)
+# 📌 Creazione etichetta target (0 = scenderà, 1 = salirà)
+def create_target(data):
+    data["Target"] = (data["Close"].shift(-1) > data["Close"]).astype(int)
+    return data.dropna()
 
+# 📌 Carica i dati e prepara il dataset
+data = get_data(ticker, period, interval)
 
-def prepare_data(ticker, period, interval):
-    data = yf.download(ticker, period=period, interval=interval)
-    if data.empty:
-        raise ValueError("Nessun dato disponibile per il ticker specificato.")
-    return data
+if data is not None:
+    data = add_indicators(data)
+    data = create_target(data)
 
+    # 📌 Controllo bilanciamento classi
+    print("🔍 Bilanciamento classi Target:")
+    print(data["Target"].value_counts())
 
-def calculate_rsi(close_prices, window=14):
-    delta = close_prices.diff()
-    gain = delta.where(delta > 0, 0).rolling(window=window).mean()
-    loss = -delta.where(delta < 0, 0).rolling(window=window).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
+    # 📌 Selezione delle feature e target
+    feature_cols = ["RSI", "CCI", "VWAP", "Stoch_K", "Stoch_D", "Williams_R", "ADX", "ROC", "ATR", "MACD", "Support", "Resistance", "SMA_50", "SMA_200", "Momentum"]
+    X = data[feature_cols]
+    y = data["Target"]
 
+    # 📌 Split dei dati in training e test
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-def calculate_stochastic(data, k_window=14, d_window=3):
-    high_column = data['High']
-    low_column = data['Low']
-    close_column = data['Close']
-    lowest_low = low_column.rolling(window=k_window).min()
-    highest_high = high_column.rolling(window=k_window).max()
-    k_percent = 100 * (close_column - lowest_low) / (highest_high - lowest_low)
-    d_percent = k_percent.rolling(window=d_window).mean()
-    return k_percent, d_percent
-
-
-def calculate_williams_r(data, window=14):
-    high_column = data['High']
-    low_column = data['Low']
-    close_column = data['Close']
-    highest_high = high_column.rolling(window=window).max()
-    lowest_low = low_column.rolling(window=window).min()
-    return -100 * (highest_high - close_column) / (highest_high - lowest_low)
-
-
-def calculate_cci(data, window=20):
-    tp = (data['High'] + data['Low'] + data['Close']) / 3
-    sma = tp.rolling(window=window).mean()
-    mad = (tp - sma).abs().rolling(window=window).mean()
-    return (tp - sma) / (0.015 * mad)
-
-
-def calculate_adx(data, window=14):
-    high, low, close = data['High'], data['Low'], data['Close']
-    plus_dm = high.diff()
-    minus_dm = low.diff()
-
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
-
-    tr = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
-    atr = tr.rolling(window=window).mean()
-
-    plus_di = 100 * pd.Series(plus_dm.flatten(), index=data.index).rolling(window=window).mean() / atr
-    minus_di = 100 * pd.Series(minus_dm.flatten(), index=data.index).rolling(window=window).mean() / atr
-
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.rolling(window=window).mean()
-
-    return adx
-
-
-def calculate_vwap(data):
-    return (data['Close'] * data['Volume']).cumsum() / data['Volume'].cumsum()
-
-
-def main():
-    ticker = input("Inserisci il ticker: ").strip().upper()
-    period = input("Periodo [Consigliato: 5y]: ").strip() or "5y"
-    interval = input("Intervallo [Consigliato: 1h]: ").strip() or "1d"
-
-    data = prepare_data(ticker, period, interval)
-    print("Dati scaricati:", data.shape)  # Debugging
-
-    if data.empty:
-        print("Errore: Nessun dato disponibile.")
-        sys.exit(1)
-
-    data['RSI'] = calculate_rsi(data['Close'])
-    data['Stoch_K'], data['Stoch_D'] = calculate_stochastic(data)
-    data['Williams_R'] = calculate_williams_r(data)
-    data['CCI'] = calculate_cci(data)
-    data['ADX'] = calculate_adx(data)
-    data['VWAP'] = calculate_vwap(data)
-
-    data.dropna(inplace=True)
-    print("Dati dopo il dropna:", data.shape)  # Debugging
-
-    if data.empty:
-        print("Errore: Nessun dato dopo la pulizia.")
-        sys.exit(1)
-
-    data['Target'] = (data['Close'].shift(-1) > data['Close']).astype(int)
-
-    features = ['RSI', 'Stoch_K', 'Stoch_D', 'Williams_R', 'CCI', 'ADX', 'VWAP']
-    X, y = data[features], data['Target']
-
-    if X.empty or y.empty:
-        print("Errore: Dataset vuoto dopo il pre-processing.")
-        sys.exit(1)
-
-    if len(y) < 2:
-        print("Errore: Troppi pochi dati per il training.")
-        sys.exit(1)
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-
-    param_dist = {
-        'n_estimators': [100, 200, 300, 500, 1000],
-        'max_depth': [3, 5, 10, 20, None],
-        'max_features': ['sqrt', 'log2', None],
-        'min_samples_split': [2, 5, 10],
-        'min_samples_leaf': [1, 2, 5, 10],
-        'bootstrap': [True, False]
+    # 📌 Parametri da ottimizzare con GridSearchCV
+    param_grid = {
+        'n_estimators': [300, 500, 800, 1000],  # Aumentiamo il numero di alberi
+        'max_depth': [3, 6, 10, 15],  # Testiamo modelli più profondi
+        'learning_rate': [0.001, 0.005, 0.01, 0.03, 0.05, 0.1],  # Raffiniamo il learning rate
+        'scale_pos_weight': [1, 2, 3, 5, 10]  # Aggiungiamo un valore più alto per gestire squilibri nelle classi
     }
 
-    random_search = RandomizedSearchCV(
-        RandomForestClassifier(class_weight='balanced', random_state=42),
-        param_distributions=param_dist,
-        n_iter=20,
-        cv=5,
-        n_jobs=-1,
-        random_state=42
-    )
+    model = XGBClassifier(use_label_encoder=False, eval_metric="logloss")
+    grid_search = GridSearchCV(model, param_grid, cv=5, scoring="accuracy", verbose=1, n_jobs=-1)
 
-    random_search.fit(X_train, y_train)
-    model = random_search.best_estimator_
-    y_pred = model.predict(X_test)
-    accuracy = accuracy_score(y_test, y_pred) * 100
+    print("🔍 Ottimizzazione dei parametri in corso...")
+    grid_search.fit(X_train, y_train)
 
-    latest_features = X.iloc[-1:]
-    latest_prediction = model.predict(latest_features)
-    direction = "Salirà" if latest_prediction[0] == 1 else "Scenderà"
-
-    print(f"Previsione: {direction}")
-    print(f"Accuratezza del modello: {accuracy:.2f}%")
-    print(f"Migliori parametri trovati: {random_search.best_params_}")
-
-    wait_for_keypress()
-    sys.exit()
-
-
-if __name__ == "__main__":
-    main()
+    print(f"✅ Accuratezza migliorata: {accuracy_score(y_test, grid_search.best_estimator_.predict(X_test)) * 100:.2f}%")
