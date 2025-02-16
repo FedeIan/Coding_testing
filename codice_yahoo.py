@@ -84,16 +84,18 @@ if data is not None:
     feature_cols = ["RSI", "CCI", "VWAP", "Stoch_K", "Stoch_D", "Williams_R", "ADX", "ROC", "ATR", "MACD", "Support", "Resistance", "SMA_50", "SMA_200", "Momentum"]
     X = data[feature_cols]
     y = data["Target"]
-
+    if X.empty or y.empty:
+        print("❌ Errore: Il dataset è vuoto dopo la preparazione. Prova con un altro intervallo o periodo.")
+        exit()
     # 📌 Split dei dati in training e test
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     # 📌 Parametri da ottimizzare con GridSearchCV
     param_grid = {
-        'n_estimators': [300, 500, 800, 1000],  # Aumentiamo il numero di alberi
-        'max_depth': [3, 6, 10, 15],  # Testiamo modelli più profondi
+        'n_estimators': [500, 800, 1200],  # Aumentiamo il numero di alberi per un apprendimento più robusto
+        'max_depth': [5, 10, 15, 20],  # Testiamo modelli più profondi
         'learning_rate': [0.001, 0.005, 0.01, 0.03, 0.05, 0.1],  # Raffiniamo il learning rate
-        'scale_pos_weight': [1, 2, 3, 5, 10]  # Aggiungiamo un valore più alto per gestire squilibri nelle classi
+        'scale_pos_weight': [1, 2, 3, 5, 10]  # Miglioriamo il bilanciamento delle classi
     }
 
     model = XGBClassifier(use_label_encoder=False, eval_metric="logloss")
