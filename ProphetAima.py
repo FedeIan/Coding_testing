@@ -5,6 +5,9 @@ from prophet import Prophet
 from datetime import datetime, timedelta
 import numpy as np
 from statsmodels.tsa.arima.model import ARIMA
+from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error
+import xgboost as xgb
+from sklearn.model_selection import train_test_split
 
 
 def download_stock_data(ticker):
@@ -15,102 +18,63 @@ def download_stock_data(ticker):
     return data[['Close', 'High', 'Low']]
 
 
-def prepare_data_for_prophet(data):
-    """Prepare stock data for Prophet model."""
-    if data.empty:
-        raise ValueError("Error: No stock data available. Check the ticker symbol.")
-
-    # Reset index
-    data = data.reset_index()
-
-    # Ensure correct column names
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = [col[0] for col in data.columns]
-
-    if 'Date' not in data.columns:
-        raise ValueError("Error: 'Date' column not found in dataset. Verify data integrity.")
-
-    if 'Close' not in data.columns:
-        raise ValueError("Error: 'Close' column not found! Check ticker validity.")
-
-    # Rename columns for Prophet
-    data = data.rename(columns={'Date': 'ds', 'Close': 'y'})
-
-    # Convert 'y' column to numeric
-    data['y'] = pd.to_numeric(data['y'], errors='coerce')
-
-    # Drop NaN values
+def prepare_data_for_xgboost(data):
+    """Prepare data for XGBoost."""
+    data['Return'] = data['Close'].pct_change()
+    data['SMA_10'] = data['Close'].rolling(window=10).mean()
+    data['SMA_50'] = data['Close'].rolling(window=50).mean()
+    data['ATR'] = (data['High'] - data['Low']).rolling(window=14).mean()
     data = data.dropna()
 
-    return data
+    X = data[['Return', 'SMA_10', 'SMA_50', 'ATR']]
+    y = data['Close'].shift(-1).dropna()
+    X = X.iloc[:-1]
+    return X, y
 
 
-def find_support_resistance(data):
-    """Identify support and resistance levels using historical price data."""
-    data['Support'] = data['Low'].rolling(window=50).min()
-    data['Resistance'] = data['High'].rolling(window=50).max()
-    return data
+def train_xgboost_model(X, y):
+    """Train XGBoost model."""
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+    model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=100)
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+
+    mape = mean_absolute_percentage_error(y_test, y_pred) * 100
+    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+    print(f"XGBoost MAPE: {mape:.2f}%, RMSE: {rmse:.2f}")
+
+    return model
 
 
-def calculate_atr(data):
-    """Calculate the Average True Range (ATR)."""
-    high_low = data['High'] - data['Low']
-    high_close = abs(data['High'] - data['Close'].shift())
-    low_close = abs(data['Low'] - data['Close'].shift())
+def forecast_with_xgboost(model, X, periods=60):
+    """Generate forecast using trained XGBoost model."""
+    future_predictions = []
+    last_features = X.iloc[-1].values.reshape(1, -1)
 
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    data['ATR'] = tr.rolling(window=14).mean()
-    return data
+    for _ in range(periods):
+        next_pred = model.predict(last_features)[0]
+        future_predictions.append(next_pred)
+        last_features = np.roll(last_features, -1)
+        last_features[0, 0] = next_pred
 
-
-def forecast_with_arima(data, periods=60):
-    """Train ARIMA model and forecast future stock prices."""
-    data = data.set_index('ds')['y']
-    model = ARIMA(data, order=(5, 1, 0))  # ARIMA(p,d,q) - (autoregressive, differencing, moving average)
-    model_fit = model.fit()
-    forecast = model_fit.forecast(steps=periods)
-    return forecast
+    return future_predictions
 
 
-def forecast_with_prophet(ticker, periods=60):
-    """Train Prophet and ARIMA models and forecast future stock prices."""
+def forecast_with_prophet_arima_xgboost(ticker, periods=60):
+    """Train Prophet, ARIMA, and XGBoost models and forecast future stock prices."""
     data = download_stock_data(ticker)
-    df = prepare_data_for_prophet(data)
-    data = find_support_resistance(data)
-    data = calculate_atr(data)
+    X, y = prepare_data_for_xgboost(data)
+    xgb_model = train_xgboost_model(X, y)
+    xgb_forecast = forecast_with_xgboost(xgb_model, X, periods)
 
-    # Prophet Model
-    model = Prophet(
-        daily_seasonality=False,
-        yearly_seasonality=True,
-        weekly_seasonality=True,
-        interval_width=0.7
-    )
+    future_dates = pd.date_range(start=data.index[-1], periods=periods + 1, freq='D')[1:]
 
-    model.add_seasonality(name='monthly', period=30.5, fourier_order=5)
-    model.fit(df)
-
-    # Create future dataframe
-    future = model.make_future_dataframe(periods=periods)
-    forecast_prophet = model.predict(future)
-
-    # ARIMA Model
-    forecast_arima = forecast_with_arima(df, periods)
-    future_dates = pd.date_range(start=df['ds'].iloc[-1], periods=periods + 1, freq='D')[1:]
-
-    # Plot results
     plt.figure(figsize=(12, 6))
-    plt.plot(df['ds'], df['y'], label='Historical Data', color='black')
-    plt.plot(forecast_prophet['ds'], forecast_prophet['yhat'], label='Prophet Forecast', linestyle='dashed',
-             color='blue')
-    plt.fill_between(forecast_prophet['ds'], forecast_prophet['yhat_lower'], forecast_prophet['yhat_upper'],
-                     color='blue', alpha=0.2, label='Prophet Uncertainty Interval')
-    plt.plot(future_dates, forecast_arima, label='ARIMA Forecast', linestyle='dashed', color='orange')
-    plt.plot(data.index, data['Support'], label='Support Level', linestyle='dotted', color='green')
-    plt.plot(data.index, data['Resistance'], label='Resistance Level', linestyle='dotted', color='red')
+    plt.plot(data.index, data['Close'], label='Historical Data', color='black')
+    plt.plot(future_dates, xgb_forecast, label='XGBoost Forecast', linestyle='dashed', color='purple')
     plt.xlabel('Date')
     plt.ylabel('Price (USD)')
-    plt.title(f'Forecast for {ticker} with Prophet & ARIMA')
+    plt.title(f'Forecast for {ticker} with XGBoost')
     plt.legend()
     plt.show()
 
@@ -118,4 +82,4 @@ def forecast_with_prophet(ticker, periods=60):
 # Usage example
 if __name__ == "__main__":
     ticker = input("Enter the stock ticker: ").strip().upper()
-    forecast_with_prophet(ticker)
+    forecast_with_prophet_arima_xgboost(ticker)
